@@ -1,0 +1,11 @@
+/build/
+/tools/
+*.apk
+*.keystore
+*.jks
+*.pem
+*.key
+*signing-password*
+.env*
+local.properties
+__pycache__/

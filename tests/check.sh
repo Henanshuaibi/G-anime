@@ -5,8 +5,9 @@ mkdir -p build/test-classes
 javac --release 8 -encoding UTF-8 -d build/test-classes src/cn/g/anime/Playback.java src/cn/g/anime/Source.java tests/PlaybackTest.java
 java -cp build/test-classes PlaybackTest
 if [ -f tools/json.jar ]; then
- javac --release 8 -encoding UTF-8 -cp tools/json.jar:build/test-classes -d build/test-classes src/cn/g/anime/Api.java src/cn/g/anime/Catalog.java tests/CatalogTest.java
+ javac --release 8 -encoding UTF-8 -cp tools/json.jar:build/test-classes -d build/test-classes src/cn/g/anime/Api.java src/cn/g/anime/Catalog.java src/cn/g/anime/SearchSession.java tests/CatalogTest.java tests/SearchSessionTest.java
  java -cp build/test-classes:tools/json.jar CatalogTest
+ java -cp build/test-classes:tools/json.jar SearchSessionTest
 else
  echo 'Catalog checks require org.json 20240303 in tools/json.jar' >&2
  exit 1

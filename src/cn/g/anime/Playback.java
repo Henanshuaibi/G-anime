@@ -16,5 +16,20 @@ public final class Playback {
    if(!route.episodes.isEmpty())result.add(route);
   }return result;
  }
+ public static int findEpisode(List<Episode> episodes,String wanted){
+  if(wanted==null||wanted.trim().isEmpty())return -1;
+  for(int i=0;i<episodes.size();i++)if(episodes.get(i).title.equals(wanted))return i;
+  String number=episodeNumber(wanted);if(number==null)return -1;
+  int result=-1;for(int i=0;i<episodes.size();i++)if(number.equals(episodeNumber(episodes.get(i).title))){if(result>=0)return -1;result=i;}
+  return result;
+ }
+ private static String episodeNumber(String title){
+  String s=java.text.Normalizer.normalize(title.trim(),java.text.Normalizer.Form.NFKC);
+  java.util.regex.Matcher m=java.util.regex.Pattern.compile("(?i)^(?:第\\s*(\\d+)\\s*[集话話]|(?:episode|ep|e)\\s*(\\d+)|(\\d+)\\s*[集话話]?)$").matcher(s);
+  if(!m.matches())return null;
+  for(int i=1;i<=m.groupCount();i++)if(m.group(i)!=null){try{return String.valueOf(Integer.parseInt(m.group(i)));}catch(NumberFormatException ignored){return null;}}
+  return null;
+ }
+ public static int resumePosition(int saved,int duration){return saved<0||duration>0&&saved>=Math.max(0,duration-3000)?0:saved;}
  public static String progressKey(String source,String id,String route,String episode){return source+":"+id+":"+route.length()+":"+route+":"+episode;}
 }

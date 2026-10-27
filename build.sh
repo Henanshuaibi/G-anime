@@ -19,6 +19,6 @@ java -Xmx512m -cp "$ganime_sdk/r8.jar" com.android.tools.r8.D8 --lib "$ganime_sd
 cp build/resources.apk build/unsigned.apk
 jar uf build/unsigned.apk -C build/dex classes.dex
 zipalign -f 4 build/unsigned.apk build/aligned.apk
-apksigner sign --ks "$ganime_key" --ks-pass "file:$ganime_password" --out build/G-anime-0.2.apk build/aligned.apk
-apksigner verify --verbose build/G-anime-0.2.apk
-zipalign -c 4 build/G-anime-0.2.apk
+apksigner sign --ks "$ganime_key" --ks-pass "file:$ganime_password" --out build/G-anime-0.3.apk build/aligned.apk
+apksigner verify --verbose build/G-anime-0.3.apk
+zipalign -c 4 build/G-anime-0.3.apk

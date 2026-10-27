@@ -16,14 +16,17 @@ public final class MainActivity extends Activity {
     private final Handler ui = new Handler();
     private Store store;
     private Source source;
-    private int category, tab, page = 1, generation, pending, finished, batchSize;
+    private int category, tab, generation, finished, batchSize;
     private String query = "";
     private boolean detail, loading, dirty;
     private LinearLayout root, content, controls;
     private ScrollView scroll;
-    private EditText search;
+    private AutoCompleteTextView search;
+    private SearchSession session;
+    private JSONObject currentDetail;
+    private final List<Future<?>> requests = new ArrayList<>();
+    private String desiredEpisode = "", desiredCatalog = "";
     private final List<JSONObject> items = new ArrayList<>();
-    private final Map<String,Integer> sourcePages = new HashMap<>();
     private final Set<String> errors = new LinkedHashSet<>();
     private final Runnable renderLater = () -> { if (!detail && tab == 0 && !isDestroyed()) render(); };
 
@@ -36,26 +39,33 @@ public final class MainActivity extends Activity {
             tab = state.getInt("tab", 0);
             category = Math.max(0, Math.min(1, state.getInt("category", 0)));
             query = state.getString("query", "");
+            desiredEpisode = state.getString("desiredEpisode", ""); desiredCatalog = state.getString("desiredCatalog", "");
         }
         String incoming = getIntent().getStringExtra("search");
-        if (incoming != null && !incoming.trim().isEmpty()) { query = incoming.trim(); tab = 0; }
+        if (incoming != null && !incoming.trim().isEmpty()) { query = incoming.trim(); tab = 0; readEpisodeIntent(getIntent()); }
         home(true);
     }
     @Override protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent); setIntent(intent);
         String name = intent.getStringExtra("search");
-        if (name != null && !name.trim().isEmpty()) { query = name.trim(); tab = 0; home(true); }
+        if (name != null && !name.trim().isEmpty()) { query = name.trim(); tab = 0; readEpisodeIntent(intent); home(true); }
     }
     @Override protected void onSaveInstanceState(Bundle b) {
         b.putInt("tab", tab); b.putInt("category", category); b.putString("query", query);
+        b.putString("desiredEpisode", desiredEpisode); b.putString("desiredCatalog", desiredCatalog);
         super.onSaveInstanceState(b);
     }
     @Override protected void onDestroy() {
-        generation++; ui.removeCallbacksAndMessages(null); network.shutdownNow(); super.onDestroy();
+        cancelSearch(); ui.removeCallbacksAndMessages(null); network.shutdownNow(); super.onDestroy();
     }
     @Override protected void onResume() {
         super.onResume();
-        if (store != null && !detail && (tab == 1 || tab == 2)) shelf();
+        if (store != null && detail && currentDetail != null) {
+            int position = root.getChildAt(0) instanceof ScrollView ? ((ScrollView) root.getChildAt(0)).getScrollY() : 0;
+            showDetail(currentDetail);
+            View child = root.getChildAt(0); if (child instanceof ScrollView) child.post(() -> ((ScrollView) child).scrollTo(0, position));
+        } else if (store != null && !detail && (tab == 1 || tab == 2)) shelf();
+        else if (store != null && !detail && tab == 0 && session != null) render();
     }
     private void shell() {
         root = Ui.column(this); root.setBackgroundColor(Ui.BG);
@@ -71,7 +81,7 @@ public final class MainActivity extends Activity {
         return result;
     }
     private void home(boolean reload) {
-        generation++; ui.removeCallbacks(renderLater); loading = false; detail = false;
+        cancelSearch(); detail = false; currentDetail = null;
         if (!enabled(source) || !source.supportsCategory(category)) {
             for (Source s : enabledSources()) if (s.supportsCategory(category)) { source = s; break; }
         }
@@ -96,7 +106,8 @@ public final class MainActivity extends Activity {
         root.addView(nav);
         if (tab == 0) {
             discoverControls();
-            if (reload || items.isEmpty() || finished < batchSize) load(true); else render();
+            if (reload || session == null) load(true);
+            else { render(); if (finished < batchSize) load(false); }
         } else {
             controls.setVisibility(View.GONE);
             if (tab == 3) sources(); else shelf();
@@ -104,7 +115,10 @@ public final class MainActivity extends Activity {
     }
     private void discoverControls() {
         LinearLayout line = Ui.row(this);
-        search = new EditText(this); search.setSingleLine(true); search.setTextColor(Ui.TEXT);
+        search = new AutoCompleteTextView(this);
+        search.setThreshold(1);
+        search.setAdapter(new ArrayAdapter<String>(this, android.R.layout.simple_dropdown_item_1line, store.recentSearches()));
+        search.setOnItemClickListener((parent, view, position, id) -> doSearch()); search.setSingleLine(true); search.setTextColor(Ui.TEXT);
         search.setHintTextColor(Ui.MUTED); search.setHint("搜名字，一次找多个来源"); search.setText(query);
         search.setTextSize(15); search.setImeOptions(EditorInfo.IME_ACTION_SEARCH);
         search.setBackground(Ui.bg(this, Ui.CARD, 12)); Ui.pad(search, 12);
@@ -122,13 +136,13 @@ public final class MainActivity extends Activity {
             final int cat = i;
             Button b = Ui.button(this, names[i], query.isEmpty() && category == i);
             Ui.weighted(filters, b);
-            b.setOnClickListener(v -> { category = cat; query = ""; home(true); });
+            b.setOnClickListener(v -> { category = cat; query = ""; desiredEpisode = ""; desiredCatalog = ""; home(true); });
         }
         Button provider = Ui.button(this, query.isEmpty() ? source.name + " ▾" : "清除搜索", false);
         Ui.weighted(filters, provider);
         provider.setTextSize(12);
         provider.setOnClickListener(v -> {
-            if (!query.isEmpty()) { query = ""; home(true); return; }
+            if (!query.isEmpty()) { query = ""; desiredEpisode = ""; desiredCatalog = ""; home(true); return; }
             List<Source> choices = new ArrayList<>();
             for (Source s : enabledSources()) if (s.supportsCategory(category)) choices.add(s);
             String[] labels = new String[choices.size()];
@@ -141,38 +155,66 @@ public final class MainActivity extends Activity {
     }
     private void doSearch() {
         query = search.getText().toString().trim();
+        desiredEpisode = ""; desiredCatalog = ""; store.rememberSearch(query);
         ((InputMethodManager)getSystemService(INPUT_METHOD_SERVICE)).hideSoftInputFromWindow(search.getWindowToken(), 0);
         search.clearFocus(); home(true);
     }
-    private void load(boolean reset) {
+    private void cancelSearch() {
+        generation++; ui.removeCallbacks(renderLater);
+        for (Future<?> request : requests) request.cancel(true);
+        requests.clear();
+        if (session != null) session.cancelPending();
+        loading = false;
+    }
+    private void load(boolean reset) { load(reset, false); }
+    private void load(boolean reset, boolean retryOnly) {
         if (loading && !reset) return;
-        if (reset) { page = 1; items.clear(); sourcePages.clear(); errors.clear(); }
-        List<Source> targets = new ArrayList<>();
-        for (Source s : query.isEmpty() ? Collections.singletonList(source) : enabledSources()) {
-            if (page == 1 || page <= sourcePages.getOrDefault(s.id, 0)) targets.add(s);
+        if (reset || session == null) {
+            cancelSearch(); items.clear(); errors.clear();
+            session = new SearchSession(query.isEmpty() ? Collections.singletonList(source) : enabledSources());
         }
-        if (targets.isEmpty()) { render(); return; }
-        loading = true; finished = 0; pending = batchSize = targets.size();
-        final int token = ++generation, requested = page, cat = category;
+        final SearchSession current = session;
+        List<SearchSession.Request> batch = current.begin(retryOnly);
+        if (batch.isEmpty()) { render(); return; }
+        loading = true; finished = 0; batchSize = batch.size();
+        final int token = ++generation, cat = category;
         final String q = query; render();
-        for (Source s : targets) network.execute(() -> {
-            Api.Page result = null; Exception failure = null;
-            try { result = Api.list(s, cat, q, requested); } catch (Exception e) { failure = e; }
-            final Api.Page data = result; final Exception error = failure;
+        requests.removeIf(Future::isDone);
+        for (SearchSession.Request request : batch) requests.add(network.submit(() -> {
+            Api.Page result = null;
+            try { result = Api.list(request.source, cat, q, request.page); }
+            catch (Exception ignored) { }
+            final Api.Page data = result;
             runOnUiThread(() -> {
                 if (token != generation || isDestroyed()) return;
-                if (data != null) {
-                    sourcePages.put(s.id, data.count); errors.remove(s.name);
-                    Set<String> seen = new HashSet<>();
-                    for (JSONObject o : items) seen.add(Store.key(o));
-                    for (JSONObject o : data.items) if (seen.add(Store.key(o))) items.add(o);
-                } else { errors.add(s.name); sourcePages.putIfAbsent(s.id, requested); }
-                pending--; finished++; loading = pending > 0;
+                if (data == null) current.failure(request); else current.success(request, data);
+                items.clear(); items.addAll(current.items());
+                errors.clear(); errors.addAll(current.errors());
+                finished++; loading = current.busy();
                 ui.removeCallbacks(renderLater);
-                if (!loading || items.size() == (data == null ? 0 : data.items.size())) render();
-                else ui.postDelayed(renderLater, 180);
+                if (!loading || finished == 1) render(); else ui.postDelayed(renderLater, 180);
             });
+        }));
+    }
+    private void readEpisodeIntent(Intent intent) {
+        desiredEpisode = intent.getStringExtra("desired_episode"); desiredCatalog = intent.getStringExtra("desired_catalog");
+        if (desiredEpisode == null) desiredEpisode = "";
+        if (desiredCatalog == null) desiredCatalog = "";
+    }
+    private void continueWatching() {
+        JSONObject recent = store.entries("history").optJSONObject(0);
+        if (recent == null || !recent.has("_episode")) return;
+        Source origin;
+        try { origin = Source.find(recent.optString("_source")); } catch (Exception e) { return; }
+        Button resume = Ui.button(this, "继续看 · " + recent.optString("vod_name") + " · " + recent.optString("_episode"), false);
+        resume.setTextSize(13); content.addView(resume, new LinearLayout.LayoutParams(-1, -2));
+        resume.setOnClickListener(v -> {
+            Intent intent = new Intent(this, PlayerActivity.class);
+            intent.putExtra("source", origin.id); intent.putExtra("id", recent.optString("vod_id"));
+            intent.putExtra("route", recent.optString("_route")); intent.putExtra("episode", recent.optString("_episode"));
+            intent.putExtra("title", recent.optString("vod_name")); startActivity(intent);
         });
+        Ui.space(content, 10);
     }
     private String friendly(Exception e) {
         if (e instanceof java.net.SocketTimeoutException) return "来源连接超时";
@@ -183,6 +225,7 @@ public final class MainActivity extends Activity {
     private void render() {
         int previousScroll = scroll.getScrollY();
         content.removeAllViews();
+        if (query.isEmpty()) continueWatching();
         List<List<JSONObject>> groups = Catalog.group(items);
         String caption = query.isEmpty() ? (category == 0 ? "日漫更新" : "国漫更新")
                 : "找到 " + groups.size() + " 部 · 已查 " + finished + "/" + batchSize + " 个来源";
@@ -193,16 +236,15 @@ public final class MainActivity extends Activity {
             content.addView(Ui.text(this, "暂时没找到，试试简称或其他名字。", 15, Ui.MUTED));
             Ui.space(content, 16);
         }
-        boolean hasMore = false;
-        for (int count : sourcePages.values()) if (page < count) hasMore = true;
+        boolean hasMore = session != null && session.hasMore();
         Button more = Ui.button(this, loading ? "查找中…" : hasMore ? "加载更多" : "重新查找", false);
         more.setEnabled(!loading); final boolean nextPage = hasMore;
-        more.setOnClickListener(v -> { if (nextPage) { page++; load(false); } else load(true); });
+        more.setOnClickListener(v -> { if (nextPage) load(false); else load(true); });
         content.addView(more, new LinearLayout.LayoutParams(-1, Ui.dp(this, 46)));
         if (!errors.isEmpty()) {
             Ui.space(content, 8);
             TextView error = Ui.text(this, "暂不可用：" + String.join("、", errors) + " · 点击重试", 12, Ui.MUTED);
-            error.setOnClickListener(v -> load(true)); content.addView(error);
+            error.setOnClickListener(v -> load(false, true)); content.addView(error);
         }
         scroll.post(() -> scroll.scrollTo(0, previousScroll));
     }
@@ -270,10 +312,15 @@ public final class MainActivity extends Activity {
             box.addView(website); content.addView(box); Ui.space(content, 10);
         }
         content.addView(Ui.text(this, "应用免费，不含广告和追踪 SDK，不加载来源网页播放器。第三方视频仍可能自带广告；来源标注不代表内容授权。", 12, Ui.MUTED));
-        Ui.space(content, 10); content.addView(Ui.text(this, "G 动漫 0.2 · 收藏与记录仅存本机", 12, Ui.MUTED));
+        Ui.space(content, 10);
+        Button clearSearch = Ui.button(this, "清空最近搜索", false); content.addView(clearSearch);
+        clearSearch.setOnClickListener(v -> new AlertDialog.Builder(this).setTitle("清空最近搜索？")
+            .setPositiveButton("清空", (d, which) -> { store.clearSearches(); Toast.makeText(this, "最近搜索已清空", Toast.LENGTH_SHORT).show(); })
+            .setNegativeButton("取消", null).show());
+        Ui.space(content, 10); content.addView(Ui.text(this, "G 动漫 0.3 · 收藏与记录仅存本机", 12, Ui.MUTED));
     }
     private void openDetail(JSONObject brief) {
-        detail = true; ui.removeCallbacks(renderLater); final int token = ++generation; shell();
+        cancelSearch(); detail = true; currentDetail = null; final int token = generation; shell();
         LinearLayout area = Ui.column(this); Ui.pad(area, 16); root.addView(area);
         Button back = Ui.button(this, "‹ 返回", false); area.addView(back); back.setOnClickListener(v -> home(false));
         area.addView(Ui.text(this, "正在获取选集…", 17, Ui.TEXT));
@@ -293,7 +340,7 @@ public final class MainActivity extends Activity {
         });
     }
     private void searchAlternatives(JSONObject item) {
-        query = item.optString("vod_name"); tab = 0; home(true);
+        query = item.optString("vod_name"); tab = 0; desiredEpisode = ""; desiredCatalog = ""; home(true);
     }
     private void alternatives(JSONObject item) {
         List<JSONObject> matches = new ArrayList<>();
@@ -309,7 +356,7 @@ public final class MainActivity extends Activity {
         new AlertDialog.Builder(this).setTitle("切换播放来源").setItems(names, (d, n) -> openDetail(matches.get(n))).show();
     }
     private void showDetail(JSONObject item) {
-        detail = true; shell();
+        detail = true; currentDetail = item; shell();
         ScrollView sv = new ScrollView(this); root.addView(sv, new LinearLayout.LayoutParams(-1, -1));
         LinearLayout c = Ui.column(this); Ui.pad(c, 16); sv.addView(c);
         Button back = Ui.button(this, "‹ 返回", false); c.addView(back); back.setOnClickListener(v -> home(false)); Ui.space(c, 12);
@@ -343,12 +390,19 @@ public final class MainActivity extends Activity {
         if (!routes.isEmpty()) {
             int selected = 0;
             for (int i = 0; i < routes.size(); i++) if (routes.get(i).name.equals(lastRoute)) selected = i;
+            if (Catalog.key(item).equals(desiredCatalog) && !desiredEpisode.isEmpty()) {
+                boolean matched = false;
+                for (int i = 0; i < routes.size(); i++) {
+                    int match = Playback.findEpisode(routes.get(i).episodes, desiredEpisode);
+                    if (match >= 0) { selected = i; lastEpisode = routes.get(i).episodes.get(match).title; matched = true; break; }
+                }
+                if (!matched) c.addView(Ui.text(this, "未匹配到“" + desiredEpisode + "”，请手动选集。", 13, Ui.MUTED));
+            }
             final int[] routeIndex = {selected}; final String previousEpisode = lastEpisode;
             Button play = Ui.button(this, lastEpisode.isEmpty() ? "开始观看 ▶" : "继续观看 · " + lastEpisode, true);
             c.addView(play, new LinearLayout.LayoutParams(-1, Ui.dp(this, 48)));
             play.setOnClickListener(v -> {
-                Playback.Route r = routes.get(routeIndex[0]); int ep = 0;
-                for (int i = 0; i < r.episodes.size(); i++) if (r.episodes.get(i).title.equals(previousEpisode)) ep = i;
+                Playback.Route r = routes.get(routeIndex[0]); int ep = Math.max(0, Playback.findEpisode(r.episodes, previousEpisode));
                 launch(item, r, r.episodes.get(ep));
             });
             Ui.space(c, 10); LinearLayout episodes = Ui.column(this);
@@ -369,21 +423,33 @@ public final class MainActivity extends Activity {
         box.removeAllViews();
         // Long-running shows use ranges so opening a title does not create thousands of views.
         int total = route.episodes.size();
+        int selected = Math.max(0, Playback.findEpisode(route.episodes, recentEpisode(item)));
         if (total > 90) {
             String[] ranges = new String[(total + 59) / 60];
             for (int i = 0; i < ranges.length; i++) ranges[i] = (i * 60 + 1) + "–" + Math.min(total, (i + 1) * 60);
-            Button choose = Ui.button(this, "选集范围：" + ranges[0] + " ▾", false); box.addView(choose);
-            LinearLayout grid = Ui.column(this); box.addView(grid); episodeRange(grid, item, route, 0, Math.min(60, total));
+            int initial = selected / 60;
+            Button choose = Ui.button(this, "选集范围：" + ranges[initial] + " ▾", false); box.addView(choose);
+            LinearLayout grid = Ui.column(this); box.addView(grid); episodeRange(grid, item, route, initial * 60, Math.min((initial + 1) * 60, total));
             choose.setOnClickListener(v -> new AlertDialog.Builder(this).setTitle("跳转集数范围").setItems(ranges, (d, n) -> {
                 choose.setText("选集范围：" + ranges[n] + " ▾"); episodeRange(grid, item, route, n * 60, Math.min(total, (n + 1) * 60));
             }).show());
         } else episodeRange(box, item, route, 0, total);
     }
+    private String recentEpisode(JSONObject item) {
+        if (Catalog.key(item).equals(desiredCatalog) && !desiredEpisode.isEmpty()) return desiredEpisode;
+        JSONArray history = store.entries("history");
+        for (int i = 0; i < history.length(); i++) {
+            JSONObject o = history.optJSONObject(i);
+            if (o != null && Store.key(o).equals(Store.key(item))) return o.optString("_episode");
+        }
+        return "";
+    }
     private void episodeRange(LinearLayout box, JSONObject item, Playback.Route route, int start, int end) {
         box.removeAllViews(); LinearLayout row = null;
+        int selected = Playback.findEpisode(route.episodes, recentEpisode(item));
         for (int i = start; i < end; i++) {
             if ((i - start) % 3 == 0) { row = Ui.row(this); box.addView(row); }
-            Playback.Episode ep = route.episodes.get(i); Button b = Ui.button(this, ep.title, false); b.setTextSize(12);
+            Playback.Episode ep = route.episodes.get(i); Button b = Ui.button(this, ep.title, i == selected); b.setTextSize(12);
             Ui.weighted(row, b); b.setOnClickListener(v -> launch(item, route, ep));
         }
         if (row != null) for (int i = (end - start) % 3; i > 0 && i < 3; i++) Ui.weighted(row, new View(this));
@@ -392,7 +458,7 @@ public final class MainActivity extends Activity {
         Intent i = new Intent(this, PlayerActivity.class);
         i.putExtra("source", item.optString("_source")); i.putExtra("id", item.optString("vod_id"));
         i.putExtra("route", route.name); i.putExtra("episode", ep.title); i.putExtra("title", item.optString("vod_name"));
-        startActivity(i);
+        desiredEpisode = ""; desiredCatalog = ""; startActivity(i);
     }
     @Override public void onBackPressed() {
         if (detail) { home(dirty); dirty = false; return; }

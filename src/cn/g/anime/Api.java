@@ -5,12 +5,13 @@ import java.util.*;
 import org.json.*;
 public final class Api {
  public static byte[] get(String url,int limit)throws Exception{
+  if(Thread.currentThread().isInterrupted())throw new java.io.InterruptedIOException("请求已取消");
   if(!Playback.isHttps(url))throw new IOException("来源需要 HTTPS 安全连接");
   for(int redirects=0;redirects<5;redirects++){
-   HttpURLConnection c=(HttpURLConnection)new URL(url).openConnection();c.setConnectTimeout(12000);c.setReadTimeout(15000);c.setInstanceFollowRedirects(false);c.setRequestProperty("User-Agent","GAnime/0.2 (Android; personal anime client)");c.setRequestProperty("Accept-Encoding","identity");
+   HttpURLConnection c=(HttpURLConnection)new URL(url).openConnection();c.setConnectTimeout(12000);c.setReadTimeout(15000);c.setInstanceFollowRedirects(false);c.setRequestProperty("User-Agent","GAnime/0.3 (Android; personal anime client)");c.setRequestProperty("Accept-Encoding","identity");
    try{int status=c.getResponseCode();if(status>=300&&status<=399){String target=c.getHeaderField("Location");if(target==null)throw new IOException("来源重定向无效");url=new URL(new URL(url),target).toString();if(!Playback.isHttps(url))throw new IOException("来源跳转到不安全连接");continue;}
     if(status!=200)throw new IOException("来源返回 HTTP "+status);if(c.getContentLengthLong()>limit)throw new IOException("来源响应过大");
-    try(InputStream in=c.getInputStream();ByteArrayOutputStream out=new ByteArrayOutputStream()){byte[] buf=new byte[8192];int n;while((n=in.read(buf))!=-1){if(out.size()+n>limit)throw new IOException("来源响应过大");out.write(buf,0,n);}return out.toByteArray();}
+    try(InputStream in=c.getInputStream();ByteArrayOutputStream out=new ByteArrayOutputStream()){byte[] buf=new byte[8192];int n;while((n=in.read(buf))!=-1){if(Thread.currentThread().isInterrupted())throw new java.io.InterruptedIOException("请求已取消");if(out.size()+n>limit)throw new IOException("来源响应过大");out.write(buf,0,n);}return out.toByteArray();}
    }finally{c.disconnect();}
   }throw new IOException("来源跳转次数过多");
  }

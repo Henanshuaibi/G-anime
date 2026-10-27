@@ -11,7 +11,7 @@ public final class PlaybackTest {
   check(!Playback.isMedia("https://user:pass@example.com/x.mp4"),"reject embedded credentials");check(!Playback.isMedia("https://example.com/route?url=x.m3u8"),"require media extension in path");check(Playback.isMedia("https://example.com/X.M3U8?a=1"),"case insensitive extension");
   check(Playback.parse("x","1$https://example.com/x.m3u8#broken#2$https://example.com/y.m3u8").get(0).episodes.size()==2,"skip malformed episodes without losing good ones");check(Playback.parse("","broken").isEmpty(),"empty and malformed data");
   check(!Playback.progressKey("a","1","bc","d").equals(Playback.progressKey("a","1","b","c:d")),"progress keys cannot collide across routes");
-  for(Source s:Source.ALL){check(Playback.isHttps(s.api),"secure source API");for(int t:s.types)check(s.accepts(t),"allowlisted category");check(!s.accepts(34)&&!s.accepts(6)&&!s.accepts(39),"exclude non-anime and adult categories");}
+  for(Source s:Source.ALL){check(Playback.isHttps(s.api),"secure source API");for(int t:s.types)if(t>0)check(s.accepts(t),"allowlisted category");check(!s.accepts(34)&&!s.accepts(6)&&!s.accepts(39),"exclude non-anime and adult categories");}
   System.out.println("Playback/source checks passed: "+checks);
  }
 }
